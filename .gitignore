@@ -1,0 +1,6 @@
+/target
+/wasmtime-v33.0.1-x86_64-linux*
+*.wasm
+*.cwasm
+*.txt
+/*.log

@@ -1,44 +1,177 @@
-# Thales Open Source Template Project
+# Key Provider API
 
-Template for creating a new project in the [Thales GitHub organization](https://github.com/ThalesGroup).
+## Disclaimer
 
-Each Thales OSS project repository **MUST** contain the following files at the root:
+THIS CODE IS FOR RESEARCH PURPOSES ONLY, AND SHOULD NOT IN ANY WAY BE USED IN PRODUCTION ENVIRONMENTS.
 
-- a `LICENSE` which has been chosen in accordance with legal department depending on your needs
+## Description
 
-- a `README.md` outlining the project goals, sponsoring sig, and community contact information, [GitHub tips about README.md](https://docs.github.com/en/github/creating-cloning-and-archiving-repositories/about-readmes)
+Stateless REST API that generates AES-128 cryptographic keys on demand.
+Key material never travels in plaintext: both the request and the response
+are **JWE JSON Serializations** ([RFC 7516](https://www.rfc-editor.org/rfc/rfc7516))
+encrypted with a pre-shared **KEK** (Key Encryption Key), and generated keys
+are returned as **JWK** ([RFC 7517](https://www.rfc-editor.org/rfc/rfc7517))
+symmetric key objects sealed inside the JWE response.
 
-- a `CONTRIBUTING.md` outlining how to contribute to the project, how to submit a pull request and an issue
+The service stores nothing — every request produces a fresh, ephemeral key
+from the OS CSPRNG. See `integration_api_readme.md` for the full protocol
+spec and `integration_openapi.yaml` for the OpenAPI contract.
 
-- a `SECURITY.md` outlining how the security concerns are handled, [GitHub tips about SECURITY.md](https://docs.github.com/en/github/managing-security-vulnerabilities/adding-a-security-policy-to-your-repository)
+## Encryption scheme
 
-Below is an example of the common structure and information expected in a README.
+| Item       | Value                                    |
+|------------|------------------------------------------|
+| Key wrap   | `A128KW` (AES Key Wrap, RFC 3394)        |
+| Encryption | `A128GCM` (AES-128-GCM)                  |
+| KEK size   | 128 bits (16 bytes), base64url-encoded   |
+| Generated  | 128-bit AES key, base64url in JWK `k`    |
 
-**Please keep this structure as is and only fill the content for each section according to your project.**
+`A128KW` wraps a freshly generated Content Encryption Key (CEK) with the
+pre-shared KEK; `A128GCM` encrypts the payload with the CEK. Requests use
+`cty: application/json`, responses use `cty: jwk+json`.
 
-If you need assistance or have question, please contact oss@thalesgroup.com
+## Endpoints
 
-## Get started
+| Method | Path      | Request                | Response               |
+|--------|-----------|------------------------|------------------------|
+| `GET`  | `/`       | —                      | `application/json` API documentation |
+| `GET`  | `/health` | — (no auth)            | `application/json` `{"status":"ok","version":"…"}` |
+| `POST` | `/v1/keys`| `application/jose+json` JWE wrapping `{"use":"enc"|"sig","kid":"…"}` | `application/jose+json` JWE wrapping the JWK |
 
-XXX project purpose it to ...
+Errors return plain JSON with `error` (`invalid_request` → 400,
+`decryption_failed` → 400, `internal_error` → 500), `message`, and a
+`request_id` (UUID v4). Unknown paths return a JSON 404. Stderr logs only
+method, path, status, and latency; each `POST /v1/keys` outcome is also
+written to its own file in the working directory, numbered per request from
+1 on each start (`1.log`, `2.log`, …), each containing one line, e.g.
+`200: provided with fresh key XXXX` or `400: invalid KEK (…)` (files left by
+a previous run are overwritten).
+Note: these log files intentionally contain freshly generated keys —
+protect them like key material.
 
-**Please also add the description into the About section (Description field)**
+## Code organization
 
-## Documentation
+```
+src/
+├── main.rs    — CLI (clap), AppState, request logic (process_keys_request),
+│                 axum handlers + Router, #[tokio::main] entrypoint
+├── crypto.rs  — JOSE primitives: JWE envelope type, base64url helpers,
+│                 KEK loading, AES-KW (RFC 3394), AES-GCM, JWE encrypt/decrypt
+└── tests.rs   — unit tests (crypto roundtrips, request logic, handlers)
+```
 
-Documentation is available at [xxx/docs](https://xxx/docs/).
+`main.rs` owns HTTP and orchestration; `crypto.rs` owns all cryptography
+and knows nothing about HTTP; `tests.rs` exercises both without a network
+stack (handlers are called directly). The KEK is loaded once at startup
+into `AppState` (served to handlers via axum `State`); if unset, the server
+still starts but `POST /v1/keys` answers `500 internal_error`.
 
-You can use [GitHub pages](https://guides.github.com/features/pages/) to create your documentation.
+## Configuration
 
-See an example here : https://github.com/ThalesGroup/ThalesGroup.github.io
+CLI flags take precedence over environment variables (which take precedence
+over defaults):
 
-**Please also add the documentation URL into the About section (Website field)**
+| Flag          | Env          | Default     | Meaning                                      |
+|---------------|--------------|-------------|----------------------------------------------|
+| `--kek-value` | `KEK_VALUE`  | — (unset)   | KEK, base64url-encoded 16 bytes (`--kek`/`KEK` are aliases) |
+| `--bind-addr` | `BIND_ADDR`  | —             | Full listen address, e.g. `127.0.0.1:3000` (overrides host/port) |
+| `--host`      | `HOST`       | `0.0.0.0`   | Listen host (all interfaces by default)      |
+| `--port`      | `PORT`       | `3000`      | Listen port                                  |
 
-## Contributing
+### Generating a new preshared key (KEK)
 
-If you are interested in contributing to the XXX project, start by reading the [Contributing guide](/CONTRIBUTING.md).
+The KEK is 16 cryptographically random bytes, base64url-encoded **without
+padding** (22 characters). Generate one from the Linux CSPRNG with standard
+CLI tools:
 
-## License
+```bash
+# coreutils only: /dev/urandom -> base64 -> base64url, strip padding
+head -c 16 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '='
 
-The chosen license in accordance with legal department must be defined into an explicit [LICENSE](https://github.com/ThalesGroup/template-project/blob/master/LICENSE) file at the root of the repository
-You can also link this file in this README section.
+# or with openssl:
+openssl rand -base64 16 | tr -d '\n' | tr '+/' '-_' | tr -d '='
+```
+
+Example output:
+
+```
+WJC37HvPdvBEz6m-qcQB-Q
+```
+
+## Compile and run (native)
+
+```bash
+cargo build
+cargo test            # 17 unit tests, no network needed
+KEK_VALUE="AAECAwQFBgcICQoLDA0ODw" ./target/debug/key-provider-api
+# or: ./target/debug/key-provider-api --kek-value AAECAwQFBgcICQoLDA0ODw --port 3000
+curl -s http://127.0.0.1:3000/health
+```
+
+(`AAECAwQFBgcICQoLDA0ODw` is the base64url encoding of bytes `00..0f` —
+a test vector, not a production secret.)
+
+## Compile and run (wasm32-wasip2)
+
+The `wasm32-wasip2` target needs tokio's unstable WASM networking support,
+enabled repo-wide by `.cargo/config.toml`:
+
+```toml
+[target.wasm32-wasip2]
+rustflags = ["--cfg", "tokio_unstable"]
+```
+
+Without that flag, tokio refuses its `net` feature on any wasm target
+(hard `compile_error!`), which `axum::serve` + `tokio::net::TcpListener`
+require. With it:
+
+```bash
+cargo build --target wasm32-wasip2
+wasmtime run -S inherit-network=y -S tcp=y \
+  --env KEK_VALUE="AAECAwQFBgcICQoLDA0ODw" --env PORT=3000 \
+  target/wasm32-wasip2/debug/key-provider-api.wasm [--port 3000]
+```
+
+(When passing CLI args to the guest, place them directly after the `.wasm`
+path, with no extra `--` separator.) The WASI build serves the same routes
+with identical behavior; verify with the same `curl` commands as native.
+
+## End-to-end tests
+
+The `tests/` folder holds a commented end-to-end suite
+(`tests/test_key_flow.py`) that exercises the full key flow against a
+running server: health/docs probes, JWE request building (A128KW + A128GCM),
+response decryption and JWK validation, key freshness, plus the error paths
+(missing body, malformed JWE, wrong KEK, unknown route). Python dependencies
+are managed with [uv](https://docs.astral.sh/uv/) via `tests/pyproject.toml`
+(only `cryptography` beyond the standard library):
+
+```bash
+# 1. start the server with the same KEK the suite will use
+KEK_VALUE="AAECAwQFBgcICQoLDA0ODw" ./target/debug/key-provider-api &
+
+# 2. install the locked test environment and run the suite
+cd tests
+uv sync
+uv run python test_key_flow.py            # defaults: 127.0.0.1:3000, test-vector KEK
+uv run python test_key_flow.py --help     # --host/--port/--kek (or KP_HOST/KP_PORT/KEK_VALUE env)
+```
+
+Expected output:
+
+```
+target: http://127.0.0.1:3000
+PASS GET /health
+PASS GET / (docs)
+PASS POST /v1/keys minimal
+PASS POST /v1/keys kid+sig
+PASS keys are fresh
+PASS missing body -> 400
+PASS malformed JWE -> 400
+PASS wrong KEK -> 400
+PASS unknown path -> 404
+9/9 checks passed
+```
+
+The script exits non-zero on any failure and works unchanged against the
+native binary and the `wasmtime`-hosted `wasm32-wasip2` build.

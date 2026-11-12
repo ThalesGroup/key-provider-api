@@ -1,0 +1,14 @@
+[project]
+name = "key-provider-api-e2e"
+version = "0.1.0"
+description = "End-to-end tests for key-provider-api (JWE A128KW + A128GCM key flow)"
+requires-python = ">=3.10"
+dependencies = [
+    # Only non-stdlib dependency: AES Key Wrap + AES-GCM primitives
+    # used to build and verify JWE envelopes client-side.
+    "cryptography>=44",
+]
+
+[tool.uv]
+# No installable package here, just scripts + a locked venv.
+package = false

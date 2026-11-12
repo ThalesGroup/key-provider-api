@@ -1,0 +1,155 @@
+openapi: "3.1.0"
+info:
+  title: Security Encryption API
+  version: "0.1.0"
+  description: >
+    Stateless AES-128 key generation service following the JOSE standard.
+    The POST /v1/keys endpoint accepts a JWE-encrypted request and returns
+    a JWE-encrypted JWK (RFC 7517) containing the generated key.
+    Both JWEs use a pre-shared AES-128 KEK with A128KW + A128GCM (RFC 7516).
+
+servers:
+  - url: "http://{host}:{port}"
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "3000"
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/keys:
+    post:
+      summary: Generate an AES-128 key
+      operationId: generateKey
+      description: >
+        Accepts a JWE JSON Serialization (RFC 7516 §7.2) whose decrypted
+        plaintext is a JSON object describing the requested key usage.
+        Returns a JWE JSON Serialization whose decrypted plaintext is an
+        RFC 7517 JWK for the generated AES-128 symmetric key.
+        Both JWEs are encrypted with the pre-shared KEK using A128KW + A128GCM.
+      requestBody:
+        required: true
+        content:
+          application/jose+json:
+            schema:
+              $ref: "#/components/schemas/JWEObject"
+      responses:
+        "200":
+          description: JWE containing the generated AES-128 JWK
+          content:
+            application/jose+json:
+              schema:
+                $ref: "#/components/schemas/JWEObject"
+        "400":
+          description: Malformed body or JWE decryption failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Key generation or response encryption failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    JWEObject:
+      description: >
+        JWE JSON Serialization (RFC 7516 §7.2).
+        Protected header is always {"alg":"A128KW","enc":"A128GCM"}.
+        For requests, cty is "application/json"; for responses, "jwk+json".
+      type: object
+      required: [protected, encrypted_key, iv, ciphertext, tag]
+      properties:
+        protected:
+          type: string
+          description: base64url-encoded JWE Protected Header
+        encrypted_key:
+          type: string
+          description: base64url-encoded CEK wrapped with the pre-shared KEK (A128KW)
+        iv:
+          type: string
+          description: base64url-encoded 96-bit Initialization Vector
+        ciphertext:
+          type: string
+          description: base64url-encoded ciphertext
+        tag:
+          type: string
+          description: base64url-encoded GCM Authentication Tag
+
+    # Informational schema — the plaintext inside the request JWE
+    KeyRequest:
+      description: Decrypted plaintext of the request JWE body
+      type: object
+      properties:
+        use:
+          type: string
+          enum: [enc, sig]
+          default: enc
+          description: Intended key use (RFC 7517 §4.2). Defaults to "enc".
+        kid:
+          type: string
+          description: Optional client-supplied key ID echoed in the response JWK.
+
+    # Informational schema — the plaintext inside the response JWE
+    JWKSymmetric:
+      description: Decrypted plaintext of the response JWE — an RFC 7517 symmetric JWK
+      type: object
+      required: [kty, k, alg, use, kid]
+      properties:
+        kty:
+          type: string
+          enum: [oct]
+          description: Key type — octet sequence (symmetric key)
+        k:
+          type: string
+          description: base64url-encoded key bytes (16 bytes for AES-128)
+        alg:
+          type: string
+          enum: [A128GCM]
+          description: Intended algorithm (RFC 7518)
+        use:
+          type: string
+          enum: [enc, sig]
+          description: Key use
+        kid:
+          type: string
+          description: >
+            Key identifier. Equals the client-supplied kid if provided,
+            otherwise a server-generated UUID v4.
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum: [invalid_request, decryption_failed, internal_error]
+        message:
+          type: string
+        request_id:
+          type: string
+          format: uuid
